@@ -1,98 +1,168 @@
+<div align="center">
+
 # VoiceGuard
 
-**VoiceGuard is a local audio deepfake screening application.** It analyzes
-uploaded speech, estimates whether it resembles real or synthetic audio, and
-shows the score and time range for each analyzed audio window. It combines a
-fine-tuned Wav2Vec2 classifier with a Streamlit interface and a command-line
-detector.
+### Voice Deepfake Detection
 
-> **Research result:** On a balanced, 2,000-clip ASVspoof 2021 DF held-out
-> subset, the latest recorded run measured **87.45% accuracy**, **96.21%
-> ROC-AUC**, **96.64% precision**, **77.60% fake recall**, and **86.08% F1**.
-> This is a benchmark-specific result, not a guarantee of performance on new
-> recordings or an assessment of forensic authenticity.
+**Local-first audio screening with time-window scores and transparent, benchmark-specific results.**
 
-## Highlights
+[![Python](https://img.shields.io/badge/Python-3.10-3776AB?logo=python&logoColor=white)](https://python.org)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.11-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org)
+[![Transformers](https://img.shields.io/badge/🤗-Transformers-yellow)](https://huggingface.co/docs/transformers)
+[![Streamlit](https://img.shields.io/badge/Streamlit-App-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io)
+[![Tests](https://img.shields.io/badge/Tests-19%20passed-2EA44F)](#validation)
 
-- Upload WAV, FLAC, or OGG speech and receive a `Real` or `Fake` screening
-  result.
-- Inspect the mean fake score, the validation-selected decision threshold,
-  per-window scores, flagged time regions, and a concise explanation.
-- Run locally through Streamlit or use the JSON-producing command-line
-  interface.
-- Fine-tune and evaluate on separate train, validation, and held-out test
-  splits; preserve manifests, hashes, metrics, and training history.
-- Includes a log-mel CNN implementation, while the latest reported benchmark
-  run uses the Wav2Vec2 transfer-learning path.
+[Overview](#overview) · [Architecture](#architecture) · [Benchmark](#benchmark) · [Get started](#get-started) · [Reproduce](#training-and-reproducibility) · [Limitations](#limitations)
 
-## Latest benchmark run
+</div>
 
-The recorded run is in `runs/wav2vec2_25k_fresh_test/` (generated model and
-run artifacts are not tracked in this repository).
+---
 
-| Split / metric | Result |
-|---|---:|
-| Training | 50,000 clips: 25,000 real + 25,000 fake |
-| Validation | 4,000 clips: 2,000 real + 2,000 fake |
-| Held-out test | 2,000 clips: 1,000 real + 1,000 fake |
-| Accuracy | 87.45% |
-| ROC-AUC | 96.21% |
-| Precision | 96.64% |
-| Fake recall | 77.60% |
-| F1 | 86.08% |
-| Confusion matrix (actual rows; predicted columns: Real, Fake) | `[[973, 27], [224, 776]]` |
+## Overview
 
-The confusion matrix means 973 real clips were correctly classified and 27
-were flagged as fake; 776 fake clips were correctly classified and 224 were
-missed. The decision threshold was selected on validation data. The test
-audio hashes do not overlap the earlier evaluated sample, but this evaluation
-still uses the same official ASVspoof 2021 DF test partition and its
-class-ordered source shards; it is not an independent external benchmark.
+**VoiceGuard — Voice Deepfake Detector** is a research prototype for screening
+speech recordings for signs associated with synthetic or manipulated audio.
+Upload a WAV, FLAC, or OGG file in the Streamlit app, or analyze it from the
+command line. VoiceGuard returns a `Real` or `Fake` screening decision, a
+mean model score, a validation-selected threshold, and scores for audio
+windows so the user can review where the model found stronger evidence.
 
-The model was fine-tuned for nine epochs on an NVIDIA GeForce RTX 5060 Laptop
-GPU. The checkpoint with the best validation ROC-AUC was from epoch 6. The
-reported test result did not reach 90% accuracy.
+> **Measured result:** The latest recorded experiment achieved **87.45%
+> accuracy** and **96.21% ROC-AUC** on a balanced, 2,000-clip held-out subset
+> of ASVspoof 2021 DF. This is a result on that benchmark subset—not a
+> general-purpose accuracy guarantee or forensic determination.
 
-## System architecture
+### Example screening result
+
+The interface shows the prediction, score, threshold, explanation, and
+time-localized model evidence.
+
+<div align="center">
+<img src="proofs/proof_ui_fake.png" alt="VoiceGuard fake-audio screening result showing its score, threshold, explanation, and flagged time region" width="920">
+</div>
+
+## What it does
+
+- **Audio input:** accepts WAV, FLAC, and OGG speech recordings.
+- **Local screening:** decodes and analyzes audio on the machine running the
+  app; the app does not upload recordings to a hosted inference service.
+- **Time-localized scores:** splits audio into overlapping windows and reports
+  each window's score and time range.
+- **Explainable output:** shows the overall score, threshold, flagged windows,
+  and a concise explanation of the decision.
+- **Two model paths:** includes a log-mel CNN and a Wav2Vec2 transfer model.
+  The benchmark results below are from the Wav2Vec2 path.
+- **Reproducible records:** saves training history, split hashes, run
+  configuration, evaluation metrics, and generated evidence.
+
+## Architecture
 
 ```text
 WAV / FLAC / OGG
-      │
-      ▼
-Decode → mono → resample to 16 kHz → overlapping audio windows
-      │
-      ├── Latest model: Wav2Vec2 encoder → masked mean/std pooling
-      │                 → binary classification head
-      │
-      └── Alternate model: log-mel spectrogram → CNN classifier
-      │
-      ▼
-Window scores → mean score + validation-selected threshold
-      │
-      ▼
-Real/Fake screening result + time regions + explanation
+        │
+        ▼
+Decode · mono · resample to 16 kHz
+        │
+        ▼
+Overlapping audio windows (up to 4 seconds)
+        │
+        ├── Wav2Vec2 encoder
+        │       → masked temporal mean + standard-deviation pooling
+        │       → binary classification head
+        │
+        └── Alternate path: log-mel spectrogram → CNN
+        │
+        ▼
+Per-window fake scores → mean score vs. validation-selected threshold
+        │
+        ▼
+Real / Fake screening · score · explanation · flagged time ranges
 ```
 
-For the reported Wav2Vec2 run, four top encoder layers and the classification
-head were fine-tuned. Each audio window is padded or cropped to at most four
-seconds; masked temporal mean and standard-deviation pooling produce the
-classifier representation. Audio preprocessing and windowing are implemented
-in `voiceguard/audio.py`; the transfer model is in `voiceguard/transfer.py`;
-inference and result explanations are in `voiceguard/inference.py`.
+The reported experiment fine-tuned the top four layers of a pretrained
+Wav2Vec2 encoder and a binary classification head. The interface displays
+model scores and temporal regions; it does not identify a specific synthesis
+algorithm or prove that a segment was edited.
+
+### Repository map
+
+```text
+app.py                  Streamlit audio-upload and results UI
+detect.py               Command-line inference
+download_dataset.py     Dataset sampling and provenance manifest
+train_transfer.py       Transfer-learning head training
+fine_tune_transfer.py   Wav2Vec2 fine-tuning and held-out evaluation
+generate_evidence.py   Evidence plots, example detections, and ZIP bundle
+show_results.py         Training and evaluation summaries
+voiceguard/
+  audio.py              Decoding, resampling, and windowing
+  transfer.py           Wav2Vec2 model and waveform preparation
+  network.py            CNN model and checkpoint loading
+  training.py           CNN training utilities
+  inference.py          Scoring, thresholds, regions, and explanations
+tests/                  Unit and component tests
+proofs/                 Training, evaluation, terminal, and UI proofs
+```
+
+## Benchmark
+
+The latest run used the NVIDIA GeForce RTX 5060 Laptop GPU and stopped after
+nine epochs. The best checkpoint by validation ROC-AUC was selected at epoch
+6; the decision threshold was selected on validation data. The held-out test
+set was not used for checkpoint or threshold selection.
+
+| Evaluation | Measured result |
+|---|---:|
+| Training set | 50,000 clips — 25,000 real, 25,000 fake |
+| Validation set | 4,000 clips — 2,000 real, 2,000 fake |
+| Held-out test set | 2,000 clips — 1,000 real, 1,000 fake |
+| Accuracy | **87.45%** |
+| ROC-AUC | **96.21%** |
+| Precision | **96.64%** |
+| Fake recall | **77.60%** |
+| F1 score | **86.08%** |
+| Validation-selected threshold | 0.9943 |
+| Confusion matrix | `[[973, 27], [224, 776]]` |
+
+Confusion-matrix rows are actual labels and columns are predicted labels in
+`Real, Fake` order: **973** real clips were correctly classified, **27** real
+clips were classified as fake, **224** fake clips were classified as real,
+and **776** fake clips were correctly classified.
+
+The new test audio has zero exact-hash overlap with the earlier evaluated
+sample. Both samples nevertheless come from the same official ASVspoof 2021
+DF test partition and class-ordered source shards; this does not constitute
+an independent external benchmark.
+
+### Evaluation and training evidence
+
+| Training / validation curves | Held-out evaluation |
+|---|---|
+| ![VoiceGuard training loss and validation performance](proofs/proof_training.png) | ![VoiceGuard held-out confusion matrix and metric chart](proofs/proof_evaluation.png) |
+
+Additional [real and fake detection charts](proofs/),
+[captured terminal output](proofs/), and example UI results are in `proofs/`.
+The machine-readable metrics and detailed provenance are generated in the
+local run directory; trained weights, datasets, and run directories are
+intentionally excluded from this repository.
 
 ## Technology
 
-- Python 3.10
-- PyTorch 2.11 with CUDA 12.8 for the recorded RTX 5060 run
-- Hugging Face Transformers / Wav2Vec2
-- NumPy, SciPy, SoundFile, and scikit-learn
-- Streamlit
-- pytest
+| Area | Technology |
+|---|---|
+| Language | Python 3.10 |
+| Deep learning | PyTorch 2.11, Hugging Face Transformers |
+| Audio / numerical | SoundFile, SciPy, NumPy |
+| Evaluation | scikit-learn |
+| Interface | Streamlit |
+| GPU used in reported run | NVIDIA GeForce RTX 5060 Laptop GPU, CUDA 12.8 |
+| Tests | pytest |
 
-## Quick start (Windows PowerShell)
+## Get started
 
-Create and activate a virtual environment, install a CUDA-enabled PyTorch
-build, then install the project dependencies:
+### 1. Set up Python and dependencies
+
+In Windows PowerShell:
 
 ```powershell
 py -3.10 -m venv .venv
@@ -103,20 +173,25 @@ python -m pip install -r requirements.txt
 python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CUDA unavailable')"
 ```
 
-If PowerShell blocks environment activation, run commands with
-`.\.venv\Scripts\python.exe`.
+The CUDA command is for the Blackwell RTX 5060 environment used for the
+reported run. If environment activation is blocked, use
+`.\.venv\Scripts\python.exe` in place of `python`.
 
-### Launch the upload interface
+### 2. Obtain a trained checkpoint
 
-The app's default checkpoint path is
-`runs/wav2vec2_25k_fresh_test/checkpoint.pt`. Obtain the compatible trained
-checkpoint as described under [Model and data](#model-and-data), then run:
+Generated checkpoints are not stored in GitHub. To train locally, first
+acquire the dataset as described under
+[Training and reproducibility](#training-and-reproducibility). The app's
+default checkpoint path is
+`runs/wav2vec2_25k_fresh_test/checkpoint.pt`.
+
+### 3. Launch the upload interface
 
 ```powershell
 python -m streamlit run app.py
 ```
 
-### Analyze audio from the command line
+### 4. Or analyze a file from the command line
 
 ```powershell
 python detect.py path\to\sample.wav `
@@ -124,35 +199,15 @@ python detect.py path\to\sample.wav `
   --output runs\wav2vec2_25k_fresh_test\detection.json
 ```
 
-### Run the tests
+## Training and reproducibility
 
-```powershell
-python -m pytest
-```
+VoiceGuard's acquisition script downloads a subset of the
+[ASVspoof 2021 DF dataset mirror](https://huggingface.co/datasets/MoaazTalab/ASVspoof_2021_DF_Balanced_Normalized)
+at pinned revision `479fbf291c9da1fca8c6b20d68b84442b2699f6b`, and records
+sampling details and audio hashes in an acquisition manifest.
 
-The project test suite passed **19 tests** in the development environment.
-
-## Model and data
-
-The dataset downloader obtains a reproducible subset of the
-[ASVspoof 2021 DF dataset mirror](https://huggingface.co/datasets/MoaazTalab/ASVspoof_2021_DF_Balanced_Normalized),
-pinned to revision
-`479fbf291c9da1fca8c6b20d68b84442b2699f6b`. The original
-[ASVspoof 2021 challenge site](https://www.asvspoof.org/index2021.html)
-describes the speech databases as available under the Open Data Commons
-Attribution License (ODC-By). The mirror card does not independently state a
-license. Check applicable terms and retain attribution before redistributing
-dataset material or trained artifacts.
-
-Download a sample dataset:
-
-```powershell
-python download_dataset.py --data-dir data `
-  --train-per-class 5000 --val-per-class 1000 --test-per-class 1000
-```
-
-To reproduce the larger training selection and exclude hashes from the earlier
-test sample:
+To reproduce the larger training selection while excluding the earlier test
+sample's hashes:
 
 ```powershell
 python download_dataset.py --data-dir data\wav2vec2_generalization `
@@ -161,7 +216,7 @@ python download_dataset.py --data-dir data\wav2vec2_generalization `
   --exclude-test-manifest data\acquisition_manifest.json --seed 42
 ```
 
-Train the transfer-learning head and fine-tune the Wav2Vec2 model:
+The fine-tuning stage starts from the project’s transfer checkpoint:
 
 ```powershell
 python train_transfer.py --data-dir data `
@@ -176,65 +231,46 @@ python fine_tune_transfer.py --data-dir data\wav2vec2_generalization `
   --unfrozen-layers 4 --patience 3 --seed 42 --require-cuda
 ```
 
-The training scripts choose the checkpoint and threshold using validation
-data; the held-out test split is reserved for final evaluation. The source
-model is a pinned Wav2Vec2 checkpoint trained for ASVspoof 2019 LA detection.
-Review its model card and applicable license before redistribution:
-[model card](https://huggingface.co/caa-speech-detection-asvspoof2019/wav2vec2-v2-unfrozen).
-
-## Evidence and outputs
-
-A completed run writes the following under its run directory:
-
-- `checkpoint.pt` — trained model and decision threshold.
-- `training_history.csv` — epoch-level training loss and validation metrics.
-- `evaluation.json` — held-out metrics, confusion matrix, and predictions.
-- `run_manifest.json` — configuration, hardware, dataset provenance, and file
-  hashes.
-- `detection_fake.json` and `detection_real.json` — example windowed
-  detections.
-- `proof_training.png` and `proof_evaluation.png` — training and evaluation
-  plots.
-- `VoiceGuard_Evidence.zip` — generated evidence bundle.
-
-Generate plots and detection examples with:
+Create plots and example detections from a completed run:
 
 ```powershell
 python generate_evidence.py --run-dir runs\wav2vec2_25k_fresh_test `
   --data-dir data\wav2vec2_generalization
 ```
 
-Project UI screenshots are in `proofs/`. A README image preview is shown
-below.
+Training requires a compatible source checkpoint and local dataset. The
+dataset mirror does not independently state a license; the upstream ASVspoof
+2021 challenge describes its databases under the Open Data Commons
+Attribution License (ODC-By). Verify the applicable terms and retain
+attribution before redistributing data or trained artifacts. The pretrained
+[Wav2Vec2 source model card](https://huggingface.co/caa-speech-detection-asvspoof2019/wav2vec2-v2-unfrozen)
+also has separate terms to review.
 
-![VoiceGuard fake audio screening result](proofs/proof_ui_fake.png)
+## Validation
 
-## Repository contents
+Run the test suite:
 
-```text
-app.py                  Streamlit upload and result interface
-detect.py               Command-line audio detection
-download_dataset.py     Dataset acquisition and provenance manifests
-train_transfer.py       Transfer-learning head training
-fine_tune_transfer.py   Wav2Vec2 fine-tuning and held-out evaluation
-generate_evidence.py   Evidence plots, examples, and ZIP bundle
-show_results.py         Printed training/evaluation summaries
-voiceguard/             Audio, model, training, and inference modules
-tests/                  Unit and component tests
-proofs/                 Generated result and UI screenshots
+```powershell
+python -m pytest
 ```
+
+The project’s current suite contains **19 passing tests** covering audio
+processing, dataset helpers, model behavior, inference explanations, and
+evidence generation.
 
 ## Limitations
 
-VoiceGuard is a research prototype for screening, not an authentication
-service. Model scores are not calibrated probabilities of authenticity.
-Window scores identify regions the model scored highly; they do not prove
-that a specific segment was generated or edited. Accuracy depends on dataset
-composition and may change with speakers, codecs, recording conditions, and
-generation methods. Do not rely on this model as the sole basis for legal,
-forensic, or other high-stakes decisions.
+VoiceGuard is a research screening prototype, not an authentication service.
+Its fake score is a model output, not a calibrated probability that a
+recording is fake. A flagged time window is a region for review, not proof of
+editing or synthesis. Performance may change for unseen speakers, codecs,
+recording conditions, and generation methods. The reported accuracy is below
+90%; do not present it otherwise or use this detector as the sole basis for
+forensic, legal, or other high-stakes decisions.
 
-Audio datasets, cached shards, trained checkpoints, and run directories are
-kept out of Git by `.gitignore`. Their inclusion in this public repository
-would be impractical due to size and may require separate redistribution
-permissions.
+## License and data
+
+Source-code licensing and dataset licensing are separate. No dataset audio,
+parquet shard, trained model checkpoint, or generated run directory is
+included in the repository. Check the upstream dataset and pretrained-model
+terms before using or redistributing those artifacts.
